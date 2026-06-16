@@ -1,14 +1,18 @@
 import time
-import random
+import sys
+import io
 
 
 class RelayTimer:
+    DISPLAY_INTERVAL = 1.0
+
     def __init__(self, runner_names=None, time_limit_per_runner=30):
         self.runner_names = runner_names or ["选手1", "选手2", "选手3"]
         self.time_limit = time_limit_per_runner
         self.results = []
         self.failure_reason = None
         self.finished = False
+        self._cancelled = False
 
     def run(self):
         print("=" * 50)
@@ -19,11 +23,17 @@ class RelayTimer:
         print("-" * 50)
 
         for i, runner in enumerate(self.runner_names):
-            if self.failure_reason:
+            if self.failure_reason or self._cancelled:
                 break
 
             print(f"\n第 {i + 1} 棒: {runner} 准备出发...")
-            input("按回车键开始...")
+            try:
+                input("按回车键开始...")
+            except (EOFError, KeyboardInterrupt):
+                self._cancelled = True
+                elapsed = 0.0
+                self._record_failure(i, runner, elapsed, "用户取消")
+                break
 
             start_time = time.time()
             print(f"{runner} 已出发！(计时中...)")
@@ -34,6 +44,10 @@ class RelayTimer:
                 elapsed = time.time() - start_time
                 self._record_failure(i, runner, elapsed, "手动中断(犯规)")
                 break
+            except EOFError:
+                elapsed = time.time() - start_time
+                self._record_failure(i, runner, elapsed, "输入结束(用户取消)")
+                break
 
             if result["status"] == "success":
                 self.results.append({
@@ -42,7 +56,7 @@ class RelayTimer:
                     "elapsed": result["elapsed"],
                     "status": "success"
                 })
-                print(f"✅ {runner} 完成! 用时: {result['elapsed']:.2f} 秒")
+                print(f"\n✅ {runner} 完成! 用时: {result['elapsed']:.2f} 秒")
                 if i < len(self.runner_names) - 1:
                     print(f"交棒给下一位选手...")
             elif result["status"] == "foul":
@@ -56,29 +70,43 @@ class RelayTimer:
         self._print_results()
 
     def _wait_for_finish(self, runner, start_time):
+        last_display = 0.0
+        use_select = True
+        try:
+            import select
+            select.select([sys.stdin], [], [], 0)
+        except (ImportError, io.UnsupportedOperation, AttributeError, ValueError, OSError):
+            use_select = False
+
         while True:
             elapsed = time.time() - start_time
 
             if elapsed >= self.time_limit:
+                print()
                 return {"status": "timeout", "elapsed": elapsed}
 
-            print(f"\r⏱  已用时: {elapsed:.1f} 秒  |  输入 f=犯规, s=成功, 等待中...", end="", flush=True)
+            if elapsed - last_display >= self.DISPLAY_INTERVAL:
+                print(f"\r⏱  已用时: {elapsed:5.1f} 秒  |  输入 f=犯规, s=成功, 等待中...", end="", flush=True)
+                last_display = elapsed
 
-            try:
+            if use_select:
                 import select
-                import sys
-                if sys.platform != 'win32':
-                    ready, _, _ = select.select([sys.stdin], [], [], 0.1)
-                    if ready:
-                        user_input = sys.stdin.readline().strip().lower()
-                        if user_input == 'f':
-                            return {"status": "foul", "elapsed": elapsed}
-                        elif user_input == 's':
-                            return {"status": "success", "elapsed": elapsed}
-                else:
+                ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+                if not ready:
+                    continue
+            else:
+                if not sys.stdin.readable():
                     time.sleep(0.1)
-            except ImportError:
-                time.sleep(0.1)
+                    continue
+
+            user_input = sys.stdin.readline()
+            if not user_input:
+                raise EOFError()
+            user_input = user_input.strip().lower()
+            if user_input == 'f':
+                return {"status": "foul", "elapsed": elapsed}
+            elif user_input == 's':
+                return {"status": "success", "elapsed": elapsed}
 
     def _record_failure(self, index, runner, elapsed, reason):
         self.results.append({
